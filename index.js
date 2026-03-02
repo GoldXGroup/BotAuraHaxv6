@@ -26,7 +26,12 @@ if (!token) {
 }
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
 });
 
 const musicStateByGuild = new Map();
@@ -242,6 +247,81 @@ client.on('interactionCreate', async (interaction) => {
     const connection = getVoiceConnection(guildId);
     connection?.destroy();
     await interaction.reply({ content: 'Música detenida.', ephemeral: true });
+  }
+});
+
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+  if (!message.guildId) return;
+
+  const content = message.content.trim();
+  const guildId = message.guildId;
+
+  if (content.startsWith('!play ')) {
+    const query = content.slice(6).trim();
+    if (!query) {
+      await message.reply('Uso: `!play <url o nombre>`');
+      return;
+    }
+
+    const voiceChannel = message.member?.voice?.channel;
+    if (!voiceChannel) {
+      await message.reply('Métete a un canal de voz primero.');
+      return;
+    }
+
+    const permissions = voiceChannel.permissionsFor(message.guild.members.me);
+    if (!permissions?.has('Connect') || !permissions?.has('Speak')) {
+      await message.reply('No tengo permisos para entrar y hablar en ese canal (Connect/Speak).');
+      return;
+    }
+
+    try {
+      const url = await resolveToYouTubeUrl(query);
+      const state = getOrCreateMusicState(guildId);
+      state.queue.push(url);
+
+      const existingConnection = getVoiceConnection(guildId);
+      const existingChannelId = existingConnection?.joinConfig?.channelId;
+      if (existingConnection && existingChannelId && existingChannelId !== voiceChannel.id) {
+        existingConnection.destroy();
+      }
+
+      const connection =
+        getVoiceConnection(guildId) ??
+        joinVoiceChannel({
+          channelId: voiceChannel.id,
+          guildId,
+          adapterCreator: message.guild.voiceAdapterCreator,
+          selfDeaf: true,
+        });
+
+      connection.subscribe(state.player);
+      await playNext(guildId);
+
+      await message.reply(`🎵 Agregado: ${url}`);
+    } catch (err) {
+      console.error('[play:text] failed:', err);
+      await message.reply('No pude reproducir eso. Revisa el link o intenta otra búsqueda.');
+    }
+    return;
+  }
+
+  if (content === '!skip') {
+    const state = getOrCreateMusicState(guildId);
+    state.player.stop(true);
+    await message.reply('⏭️ Skip.');
+    return;
+  }
+
+  if (content === '!stop') {
+    const state = getOrCreateMusicState(guildId);
+    state.queue = [];
+    state.player.stop(true);
+    const connection = getVoiceConnection(guildId);
+    connection?.destroy();
+    await message.reply('⏹️ Música detenida.');
+    return;
   }
 });
 
