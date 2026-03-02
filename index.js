@@ -270,13 +270,18 @@ client.once('ready', async () => {
 
   const rest = new REST({ version: '10' }).setToken(token);
   try {
+    console.log(`[startup] bot_user=${client.user.tag} bot_id=${client.user.id}`);
+    console.log(`[startup] registering_commands scope=${guildIdForCommands ? 'guild' : 'global'} guildId=${guildIdForCommands ?? ''} count=${commands.length}`);
     if (guildIdForCommands) {
+      await rest.put(Routes.applicationGuildCommands(client.user.id, guildIdForCommands), { body: [] });
       await rest.put(Routes.applicationGuildCommands(client.user.id, guildIdForCommands), {
         body: commands,
       });
     } else {
       await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
     }
+
+    console.log('[commands] registered successfully');
   } catch (err) {
     console.error('[commands] failed to register:', err);
   }
