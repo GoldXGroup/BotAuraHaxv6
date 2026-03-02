@@ -1,70 +1,101 @@
 import 'dotenv/config';
-import { Client, GatewayIntentBits, ActivityType } from 'discord.js';
+import {
+  Client,
+  GatewayIntentBits,
+  ActivityType,
+  REST,
+  Routes,
+  ApplicationCommandOptionType,
+} from 'discord.js';
+import {
+  joinVoiceChannel,
+  createAudioPlayer,
+  createAudioResource,
+  AudioPlayerStatus,
+  NoSubscriberBehavior,
+  StreamType,
+  getVoiceConnection,
+} from '@discordjs/voice';
+import play from 'play-dl';
 
 const token = process.env.DISCORD_TOKEN;
-const channelId = process.env.TARGET_CHANNEL_ID;
-const intervalSecondsRaw = '10800';
-const messageText = {
-  content: '@everyone @here',
-  embeds: [{
-    title: '𝐀𝐮𝐫𝐚 𝐇𝐚𝐱 𝐎𝐟𝐢𝐜𝐢𝐚𝐥',
-    description: '',
-    color: 0x00FF00,
-    thumbnail: {
-      url: 'https://media.discordapp.net/attachments/1438561171874512941/1476078034137120974/32435096-7B03-4A49-9A6C-086877A399AE.jpg?ex=699fd04b&is=699e7ecb&hm=5a9201bba6938b22a8bc326d2b8280d7d1e4698db6cb7de832879c6110ebc57d&=&format=webp&width=922&height=922'
-    },
-    image: {
-      url: 'https://media.discordapp.net/attachments/1438561171874512941/1476078047089266880/unnamed.jpg?ex=699fd04e&is=699e7ece&hm=21cd3ff5b59b1271ab73e935e969cf8247102cf96bde14dd1188a73f4212ac9e&=&format=webp&width=922&height=526'
-    },
-    fields: [
-      {
-        name: '<:ticket:1178619312112834670> Compras',
-        value: '¡Realiza tus compras únicamente en el canal de tickets!\n\nAdquiere #<:ticket:1178619312112834670>: https://discord.com/channels/1438561167940255905/1438561170851368993',
-        inline: false
-      },
-      {
-        name: '<:shield:1189991213451747358> Garantía',
-        value: '• Productos verificados\n• Soporte 24/7\n• Entrega inmediata',
-        inline: true
-      },
-      {
-        name: '<:card:1189991210876403712> Metodo de pago',
-        value: '• PayPal\n• Transferencia',
-        inline: true
-      },
-      {
-        name: '<:clock:1189991209353283624> Horario',
-        value: '• Disponible 24/7\n• Respuesta rápida\n• Atención personalizada',
-        inline: true
-      }
-    ],
-    footer: {
-      text: 'COPYRIGHT - 𝐀𝐮𝐫𝐚 𝐇𝐚𝐱 𝐎𝐟𝐢𝐜𝐢𝐚𝐥'
-    }
-  }]
-};
+const guildIdForCommands = process.env.GUILD_ID;
 
 if (!token) {
   throw new Error('Missing DISCORD_TOKEN env var');
 }
 
-const intervalSeconds = Number.parseInt(intervalSecondsRaw ?? '0', 10);
-
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
 });
 
-async function sendRecurringMessage() {
-  if (!channelId) return;
+const musicStateByGuild = new Map();
 
-  const channel = await client.channels.fetch(channelId);
-  if (!channel) throw new Error(`Channel not found: ${channelId}`);
+function getOrCreateMusicState(guildId) {
+  const existing = musicStateByGuild.get(guildId);
+  if (existing) return existing;
 
-  if (!('send' in channel)) {
-    throw new Error(`Channel is not a text-based channel: ${channelId}`);
+  const player = createAudioPlayer({
+    behaviors: {
+      noSubscriber: NoSubscriberBehavior.Pause,
+    },
+  });
+
+  const state = {
+    player,
+    queue: [],
+    playing: false,
+  };
+
+  player.on(AudioPlayerStatus.Idle, async () => {
+    state.playing = false;
+    await playNext(guildId);
+  });
+
+  musicStateByGuild.set(guildId, state);
+  return state;
+}
+
+async function resolveToYouTubeUrl(queryOrUrl) {
+  if (play.yt_validate(queryOrUrl) === 'video') return queryOrUrl;
+  if (play.yt_validate(queryOrUrl) === 'playlist') return queryOrUrl;
+
+  if (play.sp_validate(queryOrUrl) === 'track') {
+    const track = await play.spotify(queryOrUrl);
+    const search = await play.search(`${track.name} ${track.artists?.[0]?.name ?? ''}`, {
+      limit: 1,
+      source: { youtube: 'video' },
+    });
+    if (!search?.[0]?.url) throw new Error('No pude encontrar esa canción en YouTube');
+    return search[0].url;
   }
 
-  await channel.send(messageText);
+  const search = await play.search(queryOrUrl, { limit: 1, source: { youtube: 'video' } });
+  if (!search?.[0]?.url) throw new Error('No encontré resultados');
+  return search[0].url;
+}
+
+async function playNext(guildId) {
+  const state = getOrCreateMusicState(guildId);
+  if (state.playing) return;
+
+  const nextUrl = state.queue.shift();
+  if (!nextUrl) return;
+
+  const connection = getVoiceConnection(guildId);
+  if (!connection) {
+    state.queue = [];
+    return;
+  }
+
+  const stream = await play.stream(nextUrl);
+  const resource = createAudioResource(stream.stream, {
+    inputType: stream.type === 'opus' ? StreamType.Opus : StreamType.Arbitrary,
+  });
+
+  state.playing = true;
+  state.player.play(resource);
+  connection.subscribe(state.player);
 }
 
 let startTime = Date.now();
@@ -86,7 +117,7 @@ function updatePresence() {
   client.user.setPresence({
     activities: [
       {
-        name: `�𝐮𝐫𝐚 𝐇�� 𝐎𝐟𝐢𝐜𝐢𝐚𝐥 𝐂𝐨𝐦𝐩𝐥𝐞𝐱 | ${uptime}`,
+        name: `Aura Hax | ${uptime}`,
         type: ActivityType.Playing,
       },
     ],
@@ -100,23 +131,118 @@ client.once('ready', async () => {
   updatePresence();
   setInterval(updatePresence, 15000);
 
-  try {
-    await sendRecurringMessage();
-  } catch (err) {
-    console.error('[sendRecurringMessage:init] failed:', err);
-  }
+  const commands = [
+    {
+      name: 'play',
+      description: 'Reproduce música (YouTube/Spotify)',
+      options: [
+        {
+          name: 'query',
+          description: 'URL o búsqueda',
+          type: ApplicationCommandOptionType.String,
+          required: true,
+        },
+      ],
+    },
+    {
+      name: 'skip',
+      description: 'Salta la canción actual',
+    },
+    {
+      name: 'stop',
+      description: 'Detiene la música y sale del canal',
+    },
+  ];
 
-  if (channelId && intervalSeconds > 0) {
-    setInterval(async () => {
-      try {
-        await sendRecurringMessage();
-      } catch (err) {
-        console.error('[sendRecurringMessage] failed:', err);
-      }
-    }, intervalSeconds * 1000);
+  const rest = new REST({ version: '10' }).setToken(token);
+  try {
+    if (guildIdForCommands) {
+      await rest.put(Routes.applicationGuildCommands(client.user.id, guildIdForCommands), {
+        body: commands,
+      });
+    } else {
+      await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+    }
+  } catch (err) {
+    console.error('[commands] failed to register:', err);
   }
 
   console.log(`Logged in as ${client.user.tag}`);
+});
+
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  if (!interaction.guildId) return;
+
+  const guildId = interaction.guildId;
+
+  if (interaction.commandName === 'play') {
+    const query = interaction.options.getString('query', true);
+    const member = interaction.member;
+    const voiceChannel = member?.voice?.channel;
+    if (!voiceChannel) {
+      await interaction.reply({ content: 'Métete a un canal de voz primero.', ephemeral: true });
+      return;
+    }
+
+    const permissions = voiceChannel.permissionsFor(interaction.guild.members.me);
+    if (!permissions?.has('Connect') || !permissions?.has('Speak')) {
+      await interaction.reply({
+        content: 'No tengo permisos para entrar y hablar en ese canal (Connect/Speak).',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    await interaction.deferReply();
+
+    try {
+      const url = await resolveToYouTubeUrl(query);
+      const state = getOrCreateMusicState(guildId);
+      state.queue.push(url);
+
+      const existingConnection = getVoiceConnection(guildId);
+      const existingChannelId = existingConnection?.joinConfig?.channelId;
+      if (existingConnection && existingChannelId && existingChannelId !== voiceChannel.id) {
+        existingConnection.destroy();
+      }
+
+      const connection =
+        getVoiceConnection(guildId) ??
+        joinVoiceChannel({
+          channelId: voiceChannel.id,
+          guildId,
+          adapterCreator: interaction.guild.voiceAdapterCreator,
+          selfDeaf: true,
+        });
+
+      connection.subscribe(state.player);
+      await playNext(guildId);
+
+      await interaction.editReply({ content: `Agregado a la cola: ${url}` });
+    } catch (err) {
+      console.error('[play] failed:', err);
+      await interaction.editReply({ content: 'No pude reproducir eso. Revisa el link o intenta otra búsqueda.' });
+    }
+
+    return;
+  }
+
+  if (interaction.commandName === 'skip') {
+    const state = getOrCreateMusicState(guildId);
+    state.player.stop(true);
+    await interaction.reply({ content: 'Skip.', ephemeral: true });
+    return;
+  }
+
+  if (interaction.commandName === 'stop') {
+    const state = getOrCreateMusicState(guildId);
+    state.queue = [];
+    state.player.stop(true);
+    const connection = getVoiceConnection(guildId);
+    connection?.destroy();
+    await interaction.reply({ content: 'Música detenida.', ephemeral: true });
+  }
 });
 
 client.login(token);
